@@ -23,6 +23,8 @@ STOP_REASON_DELEGATE_FAILED = "delegate_failed"
 STOP_REASON_PERSISTENCE_ERROR = "persistence_error"
 STOP_REASON_RESUME_LOAD_ERROR = "resume_load_error"
 
+PHASES = {"initializing", "building_context", "waiting_model", "parsing_response", "validating_tool", "waiting_approval", "executing_tool", "recording", "finished", "failed", "interrupted"}
+
 
 @dataclass
 class TaskState:
@@ -37,6 +39,9 @@ class TaskState:
     final_answer: str = ""
     checkpoint_id: str = ""
     resume_status: str = ""
+    phase: str = "initializing"
+    last_call_id: str = ""
+    failure_phase: str = ""
 
     @classmethod
     def create(cls, task_id, user_request, run_id=""):
@@ -58,7 +63,16 @@ class TaskState:
             final_answer=str(data.get("final_answer", "")),
             checkpoint_id=str(data.get("checkpoint_id", "")),
             resume_status=str(data.get("resume_status", "")),
+            phase=str(data.get("phase", "initializing")),
+            last_call_id=str(data.get("last_call_id", "")),
+            failure_phase=str(data.get("failure_phase", "")),
         )
+
+    def set_phase(self, phase):
+        if phase not in PHASES:
+            raise ValueError(f"unknown phase: {phase}")
+        self.phase = phase
+        return self
 
     def record_attempt(self):
         # attempt 统计的是“模型被调用了几轮”，不等于 tool_steps。
@@ -73,6 +87,9 @@ class TaskState:
 
     def stop(self, stop_reason, status=STATUS_STOPPED, final_answer=""):
         # stop_reason 和 status 分开存，是为了区分“怎么停的”和“停下时是什么状态”。
+        if status == STATUS_FAILED:
+            self.failure_phase = self.phase
+        self.phase = "failed" if status == STATUS_FAILED else "finished"
         self.status = status
         self.stop_reason = stop_reason
         if final_answer != "":
@@ -90,6 +107,7 @@ class TaskState:
 
     def finish_success(self, final_answer):
         self.status = STATUS_COMPLETED
+        self.phase = "finished"
         self.stop_reason = STOP_REASON_FINAL_ANSWER_RETURNED
         self.final_answer = str(final_answer)
         return self
@@ -107,4 +125,7 @@ class TaskState:
             "final_answer": self.final_answer,
             "checkpoint_id": self.checkpoint_id,
             "resume_status": self.resume_status,
+            "phase": self.phase,
+            "last_call_id": self.last_call_id,
+            "failure_phase": self.failure_phase,
         }

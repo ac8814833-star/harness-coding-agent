@@ -107,6 +107,7 @@ class Pico:
         self.resume_state = self.evaluate_resume_state()
         self.session_path = self.session_store.save(self.session)
         self.current_task_state = None
+        self.current_call_id = ""
         self.current_run_dir = None
         self.last_prompt_metadata = {}
         self.last_completion_metadata = {}
@@ -345,6 +346,20 @@ class Pico:
         self.run_store.append_trace(task_state, payload)
         return payload
 
+    def set_phase(self, phase):
+        state = self.current_task_state
+        if state is None or state.phase == phase:
+            return
+        previous = state.phase
+        state.set_phase(phase)
+        self.run_store.write_task_state(state)
+        self.emit_trace(state, "phase_changed", {"previous_phase": previous, "phase": phase, "call_id": self.current_call_id})
+
+    def trace_tool_event(self, event, payload):
+        state = self.current_task_state
+        if state is not None:
+            self.emit_trace(state, event, {"call_id": self.current_call_id, **payload})
+
     def capture_workspace_snapshot(self):
         snapshot = {}
         for path in self.root.rglob("*"):
@@ -537,7 +552,20 @@ class Pico:
         if len(tool_events) < 2:
             return False
         recent = tool_events[-2:]
-        return all(item["name"] == name and item["args"] == args for item in recent)
+        if not all(item["name"] == name and item["args"] == args for item in recent):
+            return False
+        version = self.tool_input_fingerprint(name, args)
+        return all(item.get("input_fingerprint", version) == version for item in recent)
+
+    def tool_input_fingerprint(self, name, args):
+        if name in {"read_file", "write_file", "patch_file"} and isinstance(args, dict):
+            path = args.get("path")
+            if isinstance(path, str):
+                try:
+                    return memorylib.file_freshness(str(self.path(path)), self.root) or "missing"
+                except (ValueError, OSError):
+                    return "invalid-path"
+        return WorkspaceContext.build(self.root).fingerprint()
 
     @staticmethod
     def new_task_id():
@@ -717,6 +745,10 @@ class Pico:
 
         body = match.group("body")
         args = dict(attrs)
+        # XML attributes are strings on the wire; JSON parameters stay strict.
+        for key in ("start", "end", "timeout", "max_steps"):
+            if key in args and re.fullmatch(r"[+-]?\d+", args[key]):
+                args[key] = int(args[key])
         for key in ("content", "old_text", "new_text", "command", "task", "pattern", "path"):
             if f"<{key}>" in body:
                 args[key] = Pico.extract_raw(body, key)

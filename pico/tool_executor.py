@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import re
+import uuid
 
 from .workspace import clip
 
@@ -43,6 +44,25 @@ class ToolExecutor:
         self.agent = agent
 
     def execute(self, name, args):
+        agent = self.agent
+        previous_call_id = agent.current_call_id
+        agent.current_call_id = "call_" + uuid.uuid4().hex[:12]
+        call_id = agent.current_call_id
+        state = agent.current_task_state
+        if state is not None:
+            state.last_call_id = call_id
+        try:
+            agent.set_phase("validating_tool")
+            agent.trace_tool_event("tool_requested", {"name": name, "args": args})
+            fingerprint = agent.tool_input_fingerprint(name, args)
+            result = self._execute(name, args)
+            metadata = {**result.metadata, "call_id": call_id, "input_fingerprint": fingerprint}
+            agent.trace_tool_event("tool_finished", {"name": name, **metadata})
+            return ToolExecutionResult(result.content, metadata)
+        finally:
+            agent.current_call_id = previous_call_id
+
+    def _execute(self, name, args):
         agent = self.agent
         if agent.allowed_tools is not None and name not in agent.allowed_tools:
             return ToolExecutionResult(
@@ -97,6 +117,8 @@ class ToolExecutor:
                 ),
             )
 
+        if tool["risky"]:
+            agent.set_phase("waiting_approval")
         if tool["risky"] and not agent.approve(name, args):
             return ToolExecutionResult(
                 content=f"error: approval denied for {name}",
@@ -109,6 +131,7 @@ class ToolExecutor:
                 ),
             )
 
+        agent.set_phase("executing_tool")
         before_snapshot = agent.capture_workspace_snapshot() if tool["risky"] else {}
         after_snapshot = before_snapshot
         try:

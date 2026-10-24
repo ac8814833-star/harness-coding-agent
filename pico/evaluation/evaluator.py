@@ -2,7 +2,9 @@ import hashlib
 import json
 import locale as locale_module
 import shutil
+import shlex
 import subprocess
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +20,17 @@ from ..workspace import WorkspaceContext
 
 BENCHMARK_SCHEMA_VERSION = 1
 DEFAULT_BENCHMARK_PATH = Path("benchmarks/coding_tasks.json")
+
+
+def verifier_invocation(command):
+    """Use this interpreter for the fixed Python verifiers on every OS."""
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return command, True
+    if len(argv) == 3 and argv[0] in {"python", "python3"} and argv[1] == "-c":
+        return [sys.executable, "-c", argv[2]], False
+    return command, True
 DEFAULT_ARTIFACT_PATH = Path("benchmarks/benchmark-v1.json")
 DEFAULT_HARNESS_REGRESSION_V2_ARTIFACT_PATH = Path("artifacts/harness-regression-v2.json")
 DEFAULT_MODEL_NAME = "FakeModelClient"
@@ -489,10 +502,11 @@ class BenchmarkEvaluator:
         expected_artifact_exists = artifact_file.exists()
         artifact_digest = _digest_file(artifact_file) if expected_artifact_exists else ""
 
+        verifier_command, verifier_shell = verifier_invocation(task["verifier"])
         verifier = subprocess.run(
-            task["verifier"],
+            verifier_command,
             cwd=fixture_copy_root,
-            shell=True,
+            shell=verifier_shell,
             capture_output=True,
             text=True,
         )

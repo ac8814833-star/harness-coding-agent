@@ -43,6 +43,7 @@ class AgentLoop:
 
     def _request_model(self, task_state, user_message, prompt, prompt_metadata, run_started_at, purpose):
         agent = self.agent
+        agent.set_phase("waiting_model")
         agent.emit_trace(
             task_state,
             "model_requested",
@@ -79,6 +80,7 @@ class AgentLoop:
             prompt_metadata.update(completion_metadata)
         agent.last_completion_metadata = completion_metadata
         agent.last_prompt_metadata = prompt_metadata
+        agent.set_phase("parsing_response")
         kind, payload = agent.parse(raw)
         agent.emit_trace(
             task_state,
@@ -94,6 +96,7 @@ class AgentLoop:
 
     def _finish_success(self, task_state, user_message, final, run_started_at):
         agent = self.agent
+        agent.set_phase("recording")
         agent.record({"role": "assistant", "content": final, "created_at": now()})
         task_state.finish_success(final)
         agent.promote_durable_memory(user_message, final)
@@ -154,6 +157,7 @@ class AgentLoop:
             task_state.record_attempt()
             agent.run_store.write_task_state(task_state)
             prompt_started_at = time.monotonic()
+            agent.set_phase("building_context")
             prompt, prompt_metadata = agent._build_prompt_and_metadata(user_message)
             agent.emit_trace(
                 task_state,
@@ -219,6 +223,7 @@ class AgentLoop:
                 task_state.record_tool(name)
                 tool_started_at = time.monotonic()
                 tool_result = agent.execute_tool(name, args)
+                agent.set_phase("recording")
                 result = tool_result.content
                 agent.record(
                     {
@@ -227,6 +232,8 @@ class AgentLoop:
                         "args": args,
                         "content": result,
                         "created_at": now(),
+                        "call_id": tool_result.metadata["call_id"],
+                        "input_fingerprint": tool_result.metadata["input_fingerprint"],
                     }
                 )
                 agent.run_store.write_task_state(task_state)
