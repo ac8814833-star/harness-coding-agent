@@ -17,6 +17,9 @@ class AgentLoop:
         error_text = agent.redact_text(str(exc))
         final = f"Model request failed: {error_text}"
         task_state.stop_model_error(final)
+        progress = agent.memory.to_dict()["working"]["progress"]
+        progress["blockers"] = list(dict.fromkeys([*progress["blockers"], "model_error"]))[-8:]
+        progress["next_step"] = "Retry the model request using the saved task evidence."
         agent.run_store.write_task_state(task_state)
         checkpoint = agent.create_checkpoint(task_state, user_message, trigger="model_error")
         agent.run_store.write_task_state(task_state)
@@ -98,6 +101,8 @@ class AgentLoop:
     def _finish_success(self, task_state, user_message, final, run_started_at):
         agent = self.agent
         agent.set_phase("recording")
+        agent.memory.finish_task(final)
+        agent.session["memory"] = agent.memory.to_dict()
         agent.record({"role": "assistant", "content": final, "created_at": now()})
         task_state.finish_success(final)
         agent.promote_durable_memory(user_message, final)
@@ -146,6 +151,9 @@ class AgentLoop:
             state.stop_interrupted()
         else:
             state.stop("runtime_error", status="failed")
+        progress = agent.memory.to_dict()["working"]["progress"]
+        progress["blockers"] = list(dict.fromkeys([*progress["blockers"], state.stop_reason]))[-8:]
+        progress["next_step"] = "Inspect the last saved action and continue from the checkpoint."
         for action in agent.session.get("actions", {}).values():
             if action["status"] == "executing":
                 action["status"] = "unknown"
@@ -160,7 +168,13 @@ class AgentLoop:
     def _run(self, user_message):
         agent = self.agent
         run_started_at = time.monotonic()
-        agent.memory.set_task_summary(user_message)
+        checkpoint = agent.current_checkpoint()
+        continuing = bool(checkpoint and (checkpoint.get("current_blocker") or checkpoint.get("continuation_pending") or not checkpoint.get("completed")))
+        if continuing:
+            progress = agent.memory.to_dict()["working"]["progress"]
+            if not progress["goal"]:
+                progress["goal"] = checkpoint.get("current_goal", "")
+        agent.memory.begin_task(user_message, continuing=continuing)
         agent.record({"role": "user", "content": user_message, "created_at": now()})
 
         task_state = TaskState.create(run_id=agent.new_run_id(), task_id=agent.new_task_id(), user_request=user_message)
@@ -268,6 +282,8 @@ class AgentLoop:
                         "created_at": now(),
                         "call_id": tool_result.metadata["call_id"],
                         "input_fingerprint": tool_result.metadata["input_fingerprint"],
+                        "file_version": tool_result.metadata.get("file_version", ""),
+                        "tool_status": tool_result.metadata["tool_status"],
                     }
                 )
                 agent.run_store.write_task_state(task_state)

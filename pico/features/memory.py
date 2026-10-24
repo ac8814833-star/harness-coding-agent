@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 
 from ..workspace import clip, now
+from .. import task_progress
 
 WORKING_FILE_LIMIT = 8
 EPISODIC_NOTE_LIMIT = 12
@@ -328,6 +329,9 @@ def _normalize_note(note, index):
         "created_at": created_at,
         "note_index": note_index,
         "kind": kind,
+        "freshness": note.get("freshness"),
+        "status": str(note.get("status", "active")),
+        "stale_reason": str(note.get("stale_reason", "")),
     }
 
 
@@ -353,6 +357,7 @@ def normalize_memory_state(state, workspace_root=None):
         ]
     )[-WORKING_FILE_LIMIT:]
     state["working"] = working
+    working["progress"] = task_progress.normalize_progress(working.get("progress"))
 
     if not str(working["task_summary"]).strip() and state.get("task"):
         working["task_summary"] = clip(str(state.get("task", "")).strip(), 300)
@@ -406,6 +411,10 @@ def normalize_memory_state(state, workspace_root=None):
             "summary": text,
             "created_at": created_at,
             "freshness": freshness,
+            "source": path,
+            "line_range": summary.get("line_range", []) if isinstance(summary, dict) else [],
+            "symbols": summary.get("symbols", []) if isinstance(summary, dict) else [],
+            "last_change": summary.get("last_change", {}) if isinstance(summary, dict) else {},
         }
     state["file_summaries"] = normalized_file_summaries
 
@@ -417,7 +426,7 @@ def normalize_memory_state(state, workspace_root=None):
 
     state["task"] = working["task_summary"]
     state["files"] = list(working["recent_files"])
-    state["notes"] = [note["text"] for note in episodic_notes]
+    state["notes"] = [note["text"] for note in episodic_notes if note.get("status", "active") == "active"]
     durable_root = Path(workspace_root) / ".pico" / "memory" if workspace_root is not None else None
     durable_store = DurableMemoryStore(durable_root) if durable_root is not None else None
     state["durable_topics"] = durable_store.topic_slugs() if durable_store is not None else []
@@ -443,7 +452,7 @@ def remember_file(state, path, workspace_root=None):
     return state
 
 
-def append_note(state, text, tags=(), source="", created_at=None, workspace_root=None, kind="episodic"):
+def append_note(state, text, tags=(), source="", created_at=None, workspace_root=None, kind="episodic", freshness=None):
     state = normalize_memory_state(state, workspace_root)
     text = clip(str(text).strip(), 500)
     if not text:
@@ -459,6 +468,8 @@ def append_note(state, text, tags=(), source="", created_at=None, workspace_root
         "created_at": str(created_at).strip() if created_at else now(),
         "note_index": int(state.get("next_note_index", 0)),
         "kind": str(kind).strip() or "episodic",
+        "freshness": freshness if freshness is not None else (file_freshness(source, workspace_root) if source and workspace_root is not None else None),
+        "status": "active",
     }
     state["next_note_index"] = note["note_index"] + 1
 
@@ -467,7 +478,7 @@ def append_note(state, text, tags=(), source="", created_at=None, workspace_root
     state["episodic_notes"] = notes[-EPISODIC_NOTE_LIMIT:]
     state["notes"] = [item["text"] for item in state["episodic_notes"]]
     return state
-def set_file_summary(state, path, summary, workspace_root=None):
+def set_file_summary(state, path, summary, workspace_root=None, freshness=None, line_range=None, symbols=()):
     state = normalize_memory_state(state, workspace_root)
     path = canonicalize_path(path, workspace_root).strip()
     summary = clip(str(summary).strip(), 500)
@@ -476,7 +487,11 @@ def set_file_summary(state, path, summary, workspace_root=None):
     state["file_summaries"][path] = {
         "summary": summary,
         "created_at": now(),
-        "freshness": file_freshness(path, workspace_root),
+        "freshness": freshness if freshness is not None else file_freshness(path, workspace_root),
+        "source": path,
+        "line_range": list(line_range or []),
+        "symbols": list(symbols),
+        "last_change": dict(state.get("file_changes", {}).get(path, {})),
     }
     return state
 
@@ -487,7 +502,14 @@ def invalidate_file_summary(state, path, workspace_root=None):
     if not path:
         return state
     state["file_summaries"].pop(path, None)
+    _invalidate_source_notes(state, path, workspace_root)
     return state
+
+
+def _invalidate_source_notes(state, path, workspace_root):
+    for note in state["episodic_notes"]:
+        if note.get("source") and canonicalize_path(note["source"], workspace_root) == path:
+            note.update(status="stale", stale_reason="source_file_changed")
 
 
 def invalidate_stale_file_summaries(state, workspace_root=None):
@@ -499,6 +521,7 @@ def invalidate_stale_file_summaries(state, workspace_root=None):
             continue
         invalidated.append(path)
         state["file_summaries"].pop(path, None)
+        _invalidate_source_notes(state, path, workspace_root)
     return state, invalidated
 
 
@@ -520,6 +543,11 @@ def retrieval_candidates(state, query, limit=3, workspace_root=None):
     query_tokens = _tokenize(query)
     ranked = []
     for note in state["episodic_notes"]:
+        if note.get("status", "active") != "active":
+            continue
+        if workspace_root is not None and note.get("freshness") and file_freshness(note["source"], workspace_root) != note["freshness"]:
+            note.update(status="stale", stale_reason="source_file_changed")
+            continue
         # 召回逻辑故意保持简单透明：先看 tag 精确命中，
         # 再看关键词重叠，最后看新旧程度。这里不引入 embedding。
         note_tags = {tag.lower() for tag in note.get("tags", [])}
@@ -566,6 +594,14 @@ def render_memory_text(state, workspace_root=None):
         f"- task: {state['working']['task_summary'] or '-'}",
         f"- recent_files: {', '.join(state['working']['recent_files']) or '-'}",
     ]
+    progress = state["working"]["progress"]
+    if progress["goal"]:
+        lines.append(f"- goal: {progress['goal']}")
+    for label in ("constraints", "decisions", "completed", "blockers"):
+        if progress[label]:
+            lines.append(f"- {label}: " + " | ".join(progress[label][-4:]))
+    if progress["next_step"]:
+        lines.append(f"- next_step: {progress['next_step']}")
 
     summaries = []
     for path in state["working"]["recent_files"][:FILE_SUMMARY_LIMIT]:
@@ -612,11 +648,34 @@ class LayeredMemory:
         self.state = set_task_summary(self.state, summary, self.workspace_root)
         return self
 
+    def begin_task(self, request, continuing=False):
+        self.set_task_summary(request)
+        self.state["working"]["progress"] = task_progress.begin(self.state["working"]["progress"], request, continuing)
+        return self
+
+    def record_progress(self, name, args, metadata, content):
+        self.state["working"]["progress"] = task_progress.record(self.state["working"]["progress"], name, args, metadata, content)
+        return self
+
+    def record_file_change(self, path, operation, call_id):
+        path = self.canonical_path(path)
+        self.remember_file(path)
+        self.invalidate_file_summary(path)
+        changes = self.state.setdefault("file_changes", {})
+        changes.pop(path, None)
+        changes[path] = {"operation": operation, "call_id": call_id, "freshness": file_freshness(path, self.workspace_root), "created_at": now()}
+        self.state["file_changes"] = dict(list(changes.items())[-16:])
+        return self
+
+    def finish_task(self, answer):
+        self.state["working"]["progress"] = task_progress.finish(self.state["working"]["progress"], answer)
+        return self
+
     def remember_file(self, path):
         self.state = remember_file(self.state, path, self.workspace_root)
         return self
 
-    def append_note(self, text, tags=(), source="", created_at=None, kind="episodic"):
+    def append_note(self, text, tags=(), source="", created_at=None, kind="episodic", freshness=None):
         self.state = append_note(
             self.state,
             text,
@@ -625,11 +684,12 @@ class LayeredMemory:
             created_at=created_at,
             workspace_root=self.workspace_root,
             kind=kind,
+            freshness=freshness,
         )
         return self
 
-    def set_file_summary(self, path, summary):
-        self.state = set_file_summary(self.state, path, summary, self.workspace_root)
+    def set_file_summary(self, path, summary, **metadata):
+        self.state = set_file_summary(self.state, path, summary, self.workspace_root, **metadata)
         return self
 
     def invalidate_file_summary(self, path):

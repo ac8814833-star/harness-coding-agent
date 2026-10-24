@@ -62,6 +62,12 @@ class ToolExecutor:
             recoverylib.finish_action(agent, result)
             ApprovalManager(agent).finish(result)
             metadata = {**result.metadata, "call_id": call_id, "input_fingerprint": fingerprint, "approval_id": agent.last_approval_id}
+            if name == "read_file" and metadata["tool_status"] == "ok":
+                match = re.search(r"(?m)^# sha256: ([a-f0-9]{64})$", result.content)
+                if match:
+                    metadata["file_version"] = match.group(1)
+            agent.record_tool_progress(name, args, metadata, result.content)
+            agent.record_process_note_for_tool(name, metadata)
             agent.trace_tool_event("tool_finished", {"name": name, **metadata})
             return ToolExecutionResult(result.content, metadata)
         finally:
@@ -114,6 +120,11 @@ class ToolExecutor:
                     read_only=not tool["risky"],
                 ),
             )
+
+        guard_error = recoverylib.write_guard(agent, name, args)
+        if guard_error:
+            agent.session_path = agent.session_store.save(agent.session)
+            return ToolExecutionResult(f"error: {guard_error}", _metadata("rejected", tool_error_code="recovery_guard", risk_level="high", read_only=False))
 
         if agent.repeated_tool_call(name, args):
             return ToolExecutionResult(
@@ -182,7 +193,6 @@ class ToolExecutor:
                 workspace_fingerprint=agent.workspace.fingerprint(),
                 diff_summary=diff_summary,
             )
-            agent.record_process_note_for_tool(name, metadata)
             return ToolExecutionResult(content=content, metadata=metadata)
         except Exception as exc:
             after_snapshot = agent.capture_workspace_snapshot() if tool["risky"] else before_snapshot
@@ -200,5 +210,4 @@ class ToolExecutor:
                 workspace_fingerprint=agent.workspace.fingerprint(),
                 diff_summary=diff_summary,
             )
-            agent.record_process_note_for_tool(name, metadata)
             return ToolExecutionResult(content=f"error: tool {name} failed: {exc}", metadata=metadata)

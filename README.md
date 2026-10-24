@@ -109,6 +109,10 @@ $agent = Join-Path '.\.venv\Scripts' ($commandName + '.exe')
 | `/help` | 查看交互帮助 |
 | `/memory` | 查看工作记忆 |
 | `/session` | 查看当前会话文件路径 |
+| `/approvals` | 查看保存的待审批动作及影响预览 |
+| `/approve ID`、`/deny ID` | 批准并执行或拒绝一个待审批动作 |
+| `/actions` | 查看工具动作及中断后的核对状态 |
+| `/ack-action ID` | 检查实际执行结果后，确认已核对的未决动作 |
 | `/reset` | 重置当前会话状态 |
 | `/exit`、`/quit` | 退出程序 |
 
@@ -122,6 +126,20 @@ $agent = Join-Path '.\.venv\Scripts' ($commandName + '.exe')
 - 辅助目录：`tests/` 保存测试，`benchmarks/` 保存评估数据，`scripts/` 保存辅助脚本，`examples/` 保存示例。
 
 会话、记忆和运行工件保存在所选工作区的本地隐藏运行目录中。每次运行可生成 `task_state.json`、`trace.jsonl` 和 `report.json`；这些本地记录不随本仓库提交。
+
+## 多轮执行、审批与恢复
+
+- 工具参数统一检查必填项、类型和取值范围；XML 数字属性在解析时转换，JSON 参数保持严格类型。运行状态包含阶段与失败阶段，工具请求、审批和结果使用调用 ID 关联。
+- 文件修改审批展示路径、内容 diff 和目标版本，命令审批展示命令、目录和超时。审批决定写入会话；等待确认时中断，可恢复会话后用 `/approvals` 和 `/approve ID` 继续处理。参数、工具权限、目标版本或有效期变化后，旧审批不能继续放行。
+- 读取文件会返回 SHA-256。`write_file`、`patch_file` 支持可选 `expected_hash`，同时检查已观察文件的新鲜度。外部修改后需要重新读取文件，随后才能基于新版本修改。
+- 执行期间按 Ctrl+C 会保存已知状态、Checkpoint 和中断阶段。恢复已完成的文件修改时核对预期内容，避免重复应用；无法确认结果的命令不会自动重放。先用文件工具检查结果，再通过 `/ack-action ID` 确认。
+- 任务记忆记录目标、约束、已观察步骤、阻塞和下一步；模型报告的决策单独标注。文件摘要保留来源、行范围、版本、已读符号及最近变更。来源文件变化后，相关笔记停止召回，旧工具内容在 prompt 中标记过期，磁盘历史仍保留。
+
+以上范围对应本地执行、HITL、恢复与记忆流程。文件路径检查和人工审批继续作为本地工具边界，当前没有增加 OS 级沙箱；Checkpoint 与单文件原子保存也不等于任意外部副作用的事务或 exactly-once 执行。
+
+新增行为测试位于 `tests/test_workflow_execution.py`、`tests/test_approvals.py`、`tests/test_workflow_recovery.py` 和 `tests/test_workflow_memory.py`，使用模拟客户端，无需模型 API Key。历史 benchmark 快照保持不变；修改后的 prompt 长度及真实模型效果应重新测量。
+
+2026-10-24 本地验证：新增 43 个测试用例，完整 `tests/` 分组运行共 180 项通过、1 项因 Windows 符号链接权限跳过；修改文件的 Ruff 检查通过。评测组仍有原有 `datetime.utcnow()` 弃用提示。
 
 ## 开发与验证
 

@@ -421,8 +421,10 @@ class Pico:
         它发生在 `run_tool()` 真正执行完工具之后、下一轮 prompt 组装之前。
         也就是说：工具结果先进入完整历史，再由这个函数择优沉淀成轻量记忆。
         """
+        version_match = re.search(r"(?m)^# sha256: ([a-f0-9]{64})$", result) if name == "read_file" else None
+        read_version = version_match.group(1) if version_match else None
         if name in {"read_file", "write_file", "patch_file"} and args.get("path"):
-            recoverylib.observe_file(self, args["path"])
+            recoverylib.observe_file(self, args["path"], read_version)
         if not self.feature_enabled("memory"):
             return
         path = args.get("path")
@@ -436,15 +438,25 @@ class Pico:
             self.memory.remember_file(canonical_path)
         if name == "read_file":
             summary = memorylib.summarize_read_result(result)
-            self.memory.set_file_summary(canonical_path, summary)
-            self.memory.append_note(summary, tags=(canonical_path,), source=canonical_path)
+            symbols = re.findall(r"(?m)^\s*\d+:\s*(?:async\s+)?(?:def|class)\s+(\w+)", result)
+            self.memory.set_file_summary(canonical_path, summary, freshness=read_version, line_range=[args.get("start", 1), args.get("end", 200)], symbols=symbols[:12])
+            self.memory.append_note(summary, tags=(canonical_path,), source=canonical_path, freshness=read_version)
         elif name in {"write_file", "patch_file"}:
             self.memory.invalidate_file_summary(canonical_path)
 
     def note_tool(self, name, args, result):
         self.update_memory_after_tool(name, args, result)
 
+    def record_tool_progress(self, name, args, metadata, content):
+        if self.feature_enabled("memory"):
+            self.memory.record_progress(name, args, metadata, self.redact_text(content))
+            for path in metadata.get("affected_paths", []):
+                self.memory.record_file_change(path, name, metadata.get("call_id", ""))
+            self.session["memory"] = self.memory.to_dict()
+
     def record_process_note_for_tool(self, name, metadata):
+        if not self.feature_enabled("memory"):
+            return
         status = str(metadata.get("tool_status", "")).strip()
         if status not in {"partial_success", "error", "rejected"}:
             return
@@ -456,6 +468,8 @@ class Pico:
             text = f"{name} error on {path_text}; check the failure before retry"
         else:
             text = f"{name} rejected; choose a different action before retry"
+        if metadata.get("tool_error_code") and status != "partial_success":
+            text += f" ({metadata['tool_error_code']})"
         tags = ["process", status, *affected_paths]
         self.memory.append_note(text, tags=tuple(tags), source=name, kind="process")
         self.session["memory"] = self.memory.to_dict()
@@ -680,6 +694,8 @@ class Pico:
         self.session_path = self.session_store.save(self.session)
 
     def resolve_approval(self, approval_id, approved):
+        if type(approved) is not bool:
+            raise ValueError("approval decision must be boolean")
         from .agent_loop import AgentLoop
         try:
             return self._resolve_approval(approval_id, approved)

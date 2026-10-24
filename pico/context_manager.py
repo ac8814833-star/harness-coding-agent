@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from .features.memory import file_freshness
 
 
 DEFAULT_TOTAL_BUDGET = 12000
@@ -189,7 +190,7 @@ class ContextManager:
         else:
             relevant_lines.append("- none")
         relevant_raw = "\n".join(relevant_lines)
-        history = list(getattr(self.agent, "session", {}).get("history", []))
+        history = self._history_for_prompt()
         history_raw = self._raw_history_text(history)
         return {
             "prefix": SectionRender(raw=section_texts["prefix"], budget=len(section_texts["prefix"]), rendered=section_texts["prefix"], details={}),
@@ -295,7 +296,7 @@ class ContextManager:
         return max(1, usable // note_count)
 
     def _render_history_section(self, budget):
-        history = list(getattr(self.agent, "session", {}).get("history", []))
+        history = self._history_for_prompt()
         raw = self._raw_history_text(history)
         if not history:
             rendered = "Transcript:\n- empty"
@@ -357,6 +358,19 @@ class ContextManager:
                 **history_details,
             },
         )
+
+    def _history_for_prompt(self):
+        history = list(getattr(self.agent, "session", {}).get("history", []))
+        rendered = []
+        for item in history:
+            if item.get("role") == "tool" and item.get("name") == "read_file" and item.get("tool_status", "ok") == "ok":
+                version = item.get("file_version") or item.get("input_fingerprint")
+                path = item.get("args", {}).get("path", "")
+                root = getattr(self.agent, "root", None)
+                if version and root is not None and file_freshness(path, root) != version:
+                    item = {**item, "content": f"Stale read result for {path}; re-read the changed file before using its contents."}
+            rendered.append(item)
+        return rendered
 
     def _compressed_history_entries(self, history, recent_start):
         entries = []

@@ -52,6 +52,8 @@ def test_interrupted_approval_survives_reload_and_executes_once(tmp_path, monkey
         agent.execute_tool("write_file", {"path": "new.txt", "content": "approved"})
     pending = agent.pending_approvals()[0]
     assert not (tmp_path / "new.txt").exists()
+    with pytest.raises(ValueError, match="boolean"):
+        agent.resolve_approval(pending["approval_id"], "yes")
     restored = Pico.from_session(FakeModelClient([]), WorkspaceContext.build(tmp_path), agent.session_store, agent.session["id"], approval_policy="ask")
     result = restored.resolve_approval(pending["approval_id"], True)
     assert result.metadata["tool_status"] == "ok"

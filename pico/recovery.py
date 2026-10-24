@@ -14,10 +14,10 @@ def recovery_state(agent):
     return state
 
 
-def observe_file(agent, path):
+def observe_file(agent, path, version=None):
     relative = agent.path(path).relative_to(agent.root).as_posix()
     state = recovery_state(agent)
-    state["observed_files"][relative] = file_freshness(relative, agent.root)
+    state["observed_files"][relative] = version if version is not None else file_freshness(relative, agent.root)
     state["stale_paths"] = [item for item in state["stale_paths"] if item != relative]
 
 

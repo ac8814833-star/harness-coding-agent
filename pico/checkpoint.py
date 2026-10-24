@@ -153,6 +153,7 @@ def infer_next_step(task_state):
 def create_checkpoint(agent, task_state, user_message, trigger):
     state = checkpoint_state(agent)
     current = current_checkpoint(agent)
+    progress = agent.memory.to_dict()["working"]["progress"]
     checkpoint_id = "ckpt_" + uuid.uuid4().hex[:8]
     key_files = []
     freshness = {}
@@ -165,17 +166,18 @@ def create_checkpoint(agent, task_state, user_message, trigger):
         "parent_checkpoint_id": current.get("checkpoint_id", "") if current else "",
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "created_at": now(),
-        "current_goal": str(user_message),
-        "completed": [task_state.final_answer] if task_state.final_answer else [],
+        "current_goal": progress["goal"] or str(user_message),
+        "completed": progress["completed"] + ([task_state.final_answer] if task_state.final_answer else []),
         "excluded": [],
         "current_blocker": "" if str(task_state.stop_reason or "") in ("", "final_answer_returned") else str(task_state.stop_reason),
-        "next_step": infer_next_step(task_state),
+        "next_step": progress["next_step"] or infer_next_step(task_state),
         "key_files": key_files,
         "freshness": freshness,
         "summary": f"{trigger}: {clip(str(user_message), 120)}",
         "runtime_identity": current_runtime_identity(agent),
         "actions": [{key: item.get(key) for key in ("action_id", "name", "status", "result")} for item in agent.session.get("actions", {}).values()],
         "pending_approval_ids": [item["approval_id"] for item in agent.pending_approvals()],
+        "continuation_pending": task_state.status != "completed" or trigger == "approval_resolved",
     }
     state["items"][checkpoint_id] = checkpoint
     state["current_id"] = checkpoint_id

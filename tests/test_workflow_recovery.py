@@ -133,3 +133,12 @@ def test_one_shot_cli_interrupt_returns_130_and_saves_state(tmp_path, monkeypatc
     monkeypatch.setattr(cli, "build_agent", lambda _: agent)
     assert cli.main(["Inspect sample.txt"]) == 130
     assert agent.run_store.load_report(agent.current_task_state.run_id)["stop_reason"] == "interrupted"
+
+
+def test_stale_write_is_rejected_before_human_approval(tmp_path, monkeypatch):
+    agent = build(tmp_path)
+    agent.execute_tool("read_file", {"path": "sample.txt"})
+    (tmp_path / "sample.txt").write_text("external", encoding="utf-8")
+    agent.approval_policy = "ask"
+    monkeypatch.setattr("builtins.input", lambda _: pytest.fail("stale actions should fail before asking"))
+    assert agent.execute_tool("write_file", {"path": "sample.txt", "content": "overwrite"}).metadata["tool_error_code"] == "recovery_guard"
