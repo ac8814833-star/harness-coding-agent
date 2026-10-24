@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import re
 import uuid
 from .approvals import ApprovalManager
+from . import recovery as recoverylib
 
 from .workspace import clip
 
@@ -58,6 +59,7 @@ class ToolExecutor:
             agent.trace_tool_event("tool_requested", {"name": name, "args": args})
             fingerprint = agent.tool_input_fingerprint(name, args)
             result = self._execute(name, args)
+            recoverylib.finish_action(agent, result)
             ApprovalManager(agent).finish(result)
             metadata = {**result.metadata, "call_id": call_id, "input_fingerprint": fingerprint, "approval_id": agent.last_approval_id}
             agent.trace_tool_event("tool_finished", {"name": name, **metadata})
@@ -89,6 +91,10 @@ class ToolExecutor:
                     read_only=False,
                 ),
             )
+
+        recovered = recoverylib.recovered_action(agent, name, args)
+        if recovered:
+            return ToolExecutionResult(recovered["result"], {**_metadata("ok", read_only=True), "recovered_action_id": recovered["action_id"]})
 
         try:
             agent.validate_tool(name, args)
@@ -135,8 +141,20 @@ class ToolExecutor:
             )
 
         agent.set_phase("executing_tool")
+        guard_error = recoverylib.write_guard(agent, name, args)
+        if guard_error:
+            agent.session_path = agent.session_store.save(agent.session)
+            return ToolExecutionResult(f"error: {guard_error}", _metadata("rejected", tool_error_code="recovery_guard", risk_level="high", read_only=False))
+        # A human may have waited while a file changed; validate again at execution.
+        if tool["risky"]:
+            try:
+                agent.validate_tool(name, args)
+            except Exception as exc:
+                return ToolExecutionResult(f"error: invalid arguments for {name}: {exc}", _metadata("rejected", tool_error_code="invalid_arguments", risk_level="high", read_only=False))
         before_snapshot = agent.capture_workspace_snapshot() if tool["risky"] else {}
         after_snapshot = before_snapshot
+        if tool["risky"]:
+            recoverylib.begin_action(agent, name, args, before_snapshot)
         try:
             content = clip(tool["run"](args))
             after_snapshot = agent.capture_workspace_snapshot() if tool["risky"] else before_snapshot

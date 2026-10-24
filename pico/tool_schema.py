@@ -16,6 +16,8 @@ TOOL_PARAMETERS = {
     "patch_file": object_schema({"path": NONEMPTY, "old_text": NONEMPTY, "new_text": TEXT}, ("path", "old_text", "new_text")),
     "delegate": object_schema({"task": NONEMPTY, "max_steps": {"type": "integer", "minimum": 1}}, ("task",)),
 }
+for _tool in ("write_file", "patch_file"):
+    TOOL_PARAMETERS[_tool]["properties"]["expected_hash"] = NONEMPTY
 
 
 def validate_parameters(schema, args):

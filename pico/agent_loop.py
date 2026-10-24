@@ -1,6 +1,7 @@
 """Agent control loop extracted from the runtime facade."""
 
 import time
+import sys
 
 from .checkpoint import CHECKPOINT_NONE_STATUS, CHECKPOINT_PARTIAL_STALE_STATUS, CHECKPOINT_WORKSPACE_MISMATCH_STATUS
 from .task_state import TaskState
@@ -124,6 +125,39 @@ class AgentLoop:
         return final
 
     def run(self, user_message):
+        self.agent.current_task_state = None
+        try:
+            return self._run(user_message)
+        except KeyboardInterrupt:
+            self._persist_stop(user_message, interrupted=True)
+            raise
+        except Exception:
+            state = self.agent.current_task_state
+            if state is not None and state.status == "running":
+                self._persist_stop(user_message, interrupted=False)
+            raise
+
+    def _persist_stop(self, user_message, interrupted):
+        agent = self.agent
+        state = agent.current_task_state
+        if state is None:
+            return
+        if interrupted:
+            state.stop_interrupted()
+        else:
+            state.stop("runtime_error", status="failed")
+        for action in agent.session.get("actions", {}).values():
+            if action["status"] == "executing":
+                action["status"] = "unknown"
+        try:
+            checkpoint = agent.create_checkpoint(state, user_message, state.stop_reason)
+            agent.run_store.write_task_state(state)
+            agent.emit_trace(state, "run_interrupted" if interrupted else "runtime_failed", {"phase": state.failure_phase, "checkpoint_id": checkpoint["checkpoint_id"]})
+            agent.run_store.write_report(state, agent.redact_artifact(agent.build_report(state)))
+        except Exception as exc:
+            print(agent.redact_text(f"Could not persist stopped task: {exc}"), file=sys.stderr)
+
+    def _run(self, user_message):
         agent = self.agent
         run_started_at = time.monotonic()
         agent.memory.set_task_summary(user_message)

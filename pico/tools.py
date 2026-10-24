@@ -5,6 +5,7 @@
 """
 
 import shutil
+import hashlib
 import subprocess
 import textwrap
 from functools import partial
@@ -34,12 +35,12 @@ BASE_TOOL_SPECS = {
         "description": "Run a shell command in the repo root.",
     },
     "write_file": {
-        "schema": {"path": "str", "content": "str"},
+        "schema": {"path": "str", "content": "str", "expected_hash": "optional str"},
         "risky": True,
         "description": "Write a text file.",
     },
     "patch_file": {
-        "schema": {"path": "str", "old_text": "str", "new_text": "str"},
+        "schema": {"path": "str", "old_text": "str", "new_text": "str", "expected_hash": "optional str"},
         "risky": True,
         "description": "Replace one exact text block in a file.",
     },
@@ -178,9 +179,10 @@ def tool_read_file(context, args):
     end = int(args.get("end", 200))
     if start < 1 or end < start:
         raise ValueError("invalid line range")
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    data = path.read_bytes()
+    lines = data.decode("utf-8", errors="replace").splitlines()
     body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(lines[start - 1:end], start=start))
-    return f"# {path.relative_to(context.root)}\n{body}"
+    return f"# {path.relative_to(context.root)}\n# sha256: {hashlib.sha256(data).hexdigest()}\n{body}"
 
 
 def tool_search(context, args):

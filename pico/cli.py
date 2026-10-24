@@ -50,6 +50,8 @@ HELP_DETAILS = textwrap.dedent(
     /approvals List saved pending tool approvals.
     /approve ID Approve and execute one saved action.
     /deny ID Reject one saved action.
+    /actions Show local actions and their recovery outcomes.
+    /ack-action ID Mark an uncertain action reviewed after inspecting its effects.
     /reset   Clear the current session history and memory.
     /exit    Exit the agent.
     """
@@ -327,6 +329,9 @@ def main(argv=None):
             print()
             try:
                 print(agent.ask(prompt))
+            except KeyboardInterrupt:
+                print("Task interrupted; saved state can be resumed.", file=sys.stderr)
+                return 130
             except RuntimeError as exc:
                 print(str(exc), file=sys.stderr)
                 return 1
@@ -358,10 +363,22 @@ def main(argv=None):
             for item in agent.pending_approvals():
                 print(agent.redact_text(json.dumps(item, ensure_ascii=False, indent=2)))
             continue
+        if user_input == "/actions":
+            print(agent.redact_text(json.dumps(agent.session.get("actions", {}), ensure_ascii=False, indent=2)))
+            continue
+        if user_input.startswith("/ack-action "):
+            try:
+                agent.acknowledge_action(user_input.split(maxsplit=1)[1].strip())
+                print("action marked reviewed")
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+            continue
         if user_input.startswith(("/approve ", "/deny ")):
             command, approval_id = user_input.split(maxsplit=1)
             try:
                 print(agent.resolve_approval(approval_id.strip(), command == "/approve").content)
+            except KeyboardInterrupt:
+                print("Approval interrupted; pending state was saved.")
             except ValueError as exc:
                 print(str(exc), file=sys.stderr)
             continue
@@ -373,5 +390,7 @@ def main(argv=None):
         print()
         try:
             print(agent.ask(user_input))
+        except KeyboardInterrupt:
+            print("Task interrupted; saved state can be resumed.")
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)

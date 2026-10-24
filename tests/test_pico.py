@@ -251,7 +251,7 @@ def test_invalid_risky_tool_does_not_prompt_for_approval(tmp_path):
     with patch("builtins.input") as mock_input:
         result = agent.run_tool("write_file", {})
 
-    assert result.startswith("error: invalid arguments for write_file: 'path'")
+    assert result.startswith("error: invalid arguments for write_file: missing path")
     assert 'example: <tool name="write_file"' in result
     mock_input.assert_not_called()
 
@@ -290,7 +290,8 @@ def test_welcome_screen_keeps_box_shape_for_long_paths(tmp_path):
     assert len(lines) >= 5
     assert len({len(line) for line in lines}) == 1
     assert "..." in welcome
-    assert "(  o o  )" in welcome
+    from pico.cli import WELCOME_ART
+    assert all(art_line in welcome for art_line in WELCOME_ART)
     assert "MINI-CODING-AGENT" not in welcome
     assert "MINI CODING AGENT" not in welcome
     assert "pico" in welcome

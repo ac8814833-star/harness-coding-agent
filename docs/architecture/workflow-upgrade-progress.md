@@ -38,3 +38,16 @@ Implemented: file-backed approval IDs and decisions, bounded file diffs/command
 previews, expiry on target/runtime changes, persisted pending actions and local
 `/approvals`, `/approve ID`, `/deny ID` commands. Approval execution is single-use;
 reloaded requests are revalidated against current policy, tools and file versions.
+
+Validation: 8 approval tests passed; the related suite passed 37 tests with one
+symbolic-link privilege skip. Shell test commands now use platform-native quoting.
+
+## Milestone 3
+
+Implemented: atomic JSON replacement with file flush, saved interruption/failure
+phase and report, observed/expected file-version checks before modifications,
+persisted action intents/results and file-postcondition reconciliation after restart.
+Uncertain command outcomes require explicit `/actions` inspection and `/ack-action`.
+Read-only inspection remains available. Checkpoints expose completed/uncertain
+actions and pending approvals. This covers controlled interruption, not SIGKILL,
+power-loss transactions, OS process isolation or exactly-once shell execution.

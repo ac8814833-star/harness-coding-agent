@@ -508,8 +508,7 @@ def summarize_read_result(result, limit=180):
     lines = [line.strip() for line in str(result).splitlines() if line.strip()]
     if not lines:
         return "(empty)"
-    if lines[0].startswith("# "):
-        lines = lines[1:]
+    lines = [line for line in lines if not line.startswith("# ")]
     if not lines:
         return "(empty)"
     summary = " | ".join(lines[:3])

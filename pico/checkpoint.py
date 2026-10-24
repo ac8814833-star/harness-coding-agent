@@ -3,6 +3,7 @@
 import uuid
 
 from .features import memory as memorylib
+from .recovery import recovery_state
 from .workspace import clip, now
 
 CHECKPOINT_SCHEMA_VERSION = "phase1-v1"
@@ -91,6 +92,9 @@ def evaluate_resume_state(agent):
             else:
                 status = CHECKPOINT_FULL_VALID_STATUS
 
+    recovery = recovery_state(agent)
+    recovery["stale_paths"] = list(dict.fromkeys([*recovery["stale_paths"], *stale_paths]))
+
     resume_state = {
         "status": status,
         "stale_paths": stale_paths,
@@ -122,6 +126,10 @@ def render_checkpoint_text(agent):
     lines.append(f"- Key files: {', '.join(key_files) or '-'}")
     if checkpoint.get("completed"):
         lines.append("- Completed: " + " | ".join(str(item) for item in checkpoint.get("completed", [])))
+    for action in checkpoint.get("actions", [])[-6:]:
+        lines.append(f"- Action {action['action_id']}: {action['name']} ({action['status']})")
+    if checkpoint.get("pending_approval_ids"):
+        lines.append("- Pending approvals: " + ", ".join(checkpoint["pending_approval_ids"]))
     if checkpoint.get("excluded"):
         lines.append("- Excluded: " + " | ".join(str(item) for item in checkpoint.get("excluded", [])))
     if agent.resume_state.get("stale_paths"):
@@ -166,6 +174,8 @@ def create_checkpoint(agent, task_state, user_message, trigger):
         "freshness": freshness,
         "summary": f"{trigger}: {clip(str(user_message), 120)}",
         "runtime_identity": current_runtime_identity(agent),
+        "actions": [{key: item.get(key) for key in ("action_id", "name", "status", "result")} for item in agent.session.get("actions", {}).values()],
+        "pending_approval_ids": [item["approval_id"] for item in agent.pending_approvals()],
     }
     state["items"][checkpoint_id] = checkpoint
     state["current_id"] = checkpoint_id

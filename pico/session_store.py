@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from .storage import write_json_atomic
 
 
 class SessionStore:
@@ -14,11 +15,14 @@ class SessionStore:
 
     def save(self, session):
         path = self.path(session["id"])
-        path.write_text(json.dumps(session, indent=2), encoding="utf-8")
+        write_json_atomic(path, session)
         return path
 
     def load(self, session_id):
-        return json.loads(self.path(session_id).read_text(encoding="utf-8"))
+        try:
+            return json.loads(self.path(session_id).read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid session JSON: {session_id}") from exc
 
     def latest(self):
         files = sorted(self.root.glob("*.json"), key=lambda path: path.stat().st_mtime)

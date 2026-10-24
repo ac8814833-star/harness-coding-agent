@@ -15,6 +15,7 @@ from pathlib import Path
 from . import checkpoint as checkpointlib
 from .features import memory as memorylib
 from . import security as securitylib
+from . import recovery as recoverylib
 from .context_manager import ContextManager
 from .checkpoint import CHECKPOINT_NONE_STATUS
 from .prompt_prefix import build_prompt_prefix, tool_signature
@@ -100,6 +101,7 @@ class Pico:
             workspace_root=self.root,
         )
         self.session["memory"] = self.memory.to_dict()
+        recoverylib.reconcile_actions(self)
         self.tools = self._apply_tool_allowlist(self.build_tools())
         self.tool_executor = ToolExecutor(self)
         self.prefix_state = self.build_prefix()
@@ -419,6 +421,8 @@ class Pico:
         它发生在 `run_tool()` 真正执行完工具之后、下一轮 prompt 组装之前。
         也就是说：工具结果先进入完整历史，再由这个函数择优沉淀成轻量记忆。
         """
+        if name in {"read_file", "write_file", "patch_file"} and args.get("path"):
+            recoverylib.observe_file(self, args["path"])
         if not self.feature_enabled("memory"):
             return
         path = args.get("path")
@@ -583,6 +587,9 @@ class Pico:
         # 和 trace 的区别在于，trace 关注过程，report 关注结果与关键指标。
         return {
             "run_id": task_state.run_id,
+            "phase": task_state.phase,
+            "failure_phase": task_state.failure_phase,
+            "last_call_id": task_state.last_call_id,
             "task_id": task_state.task_id,
             "status": task_state.status,
             "stop_reason": task_state.stop_reason,
@@ -665,7 +672,27 @@ class Pico:
     def pending_approvals(self):
         return [dict(item) for item in self.session.get("approvals", {}).values() if item.get("status") == "pending"]
 
+    def acknowledge_action(self, action_id):
+        record = self.session.get("actions", {}).get(action_id)
+        if not record or record["status"] not in {"executing", "unknown"}:
+            raise ValueError("action does not require review")
+        record.update(status="reviewed", reviewed_at=now())
+        self.session_path = self.session_store.save(self.session)
+
     def resolve_approval(self, approval_id, approved):
+        from .agent_loop import AgentLoop
+        try:
+            return self._resolve_approval(approval_id, approved)
+        except KeyboardInterrupt:
+            if self.current_task_state is not None:
+                AgentLoop(self)._persist_stop(self.current_task_state.user_request, interrupted=True)
+            raise
+        except Exception:
+            if self.current_task_state is not None and self.current_task_state.status == "running":
+                AgentLoop(self)._persist_stop(self.current_task_state.user_request, interrupted=False)
+            raise
+
+    def _resolve_approval(self, approval_id, approved):
         """Resume one saved local action; an approval can be consumed only once."""
         from .task_state import TaskState
 
