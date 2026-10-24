@@ -6,6 +6,7 @@
 """
 
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -46,6 +47,9 @@ HELP_DETAILS = textwrap.dedent(
     /help    Show this help message.
     /memory  Show the agent's distilled working memory.
     /session Show the path to the saved session file.
+    /approvals List saved pending tool approvals.
+    /approve ID Approve and execute one saved action.
+    /deny ID Reject one saved action.
     /reset   Clear the current session history and memory.
     /exit    Exit the agent.
     """
@@ -349,6 +353,17 @@ def main(argv=None):
             continue
         if user_input == "/session":
             print(agent.session_path)
+            continue
+        if user_input == "/approvals":
+            for item in agent.pending_approvals():
+                print(agent.redact_text(json.dumps(item, ensure_ascii=False, indent=2)))
+            continue
+        if user_input.startswith(("/approve ", "/deny ")):
+            command, approval_id = user_input.split(maxsplit=1)
+            try:
+                print(agent.resolve_approval(approval_id.strip(), command == "/approve").content)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
             continue
         if user_input == "/reset":
             agent.reset()

@@ -23,6 +23,7 @@ from .security import REDACTED_VALUE
 from .session_store import SessionStore
 from .tool_context import ToolContext
 from .tool_executor import ToolExecutor
+from .approvals import ApprovalManager
 from . import tools as toolkit
 from .workspace import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext, clip, now
 
@@ -108,6 +109,8 @@ class Pico:
         self.session_path = self.session_store.save(self.session)
         self.current_task_state = None
         self.current_call_id = ""
+        self.last_approval_id = ""
+        self._approval_to_resume = ""
         self.current_run_dir = None
         self.last_prompt_metadata = {}
         self.last_completion_metadata = {}
@@ -657,17 +660,42 @@ class Pico:
         return toolkit.tool_delegate(self.tool_context(), args)
 
     def approve(self, name, args):
-        if self.read_only:
-            return False
-        if self.approval_policy == "auto":
-            return True
-        if self.approval_policy == "never":
-            return False
+        return ApprovalManager(self).request(name, args)
+
+    def pending_approvals(self):
+        return [dict(item) for item in self.session.get("approvals", {}).values() if item.get("status") == "pending"]
+
+    def resolve_approval(self, approval_id, approved):
+        """Resume one saved local action; an approval can be consumed only once."""
+        from .task_state import TaskState
+
+        manager = ApprovalManager(self)
+        record = manager.items.get(approval_id)
+        if not record or record["status"] != "pending":
+            raise ValueError("approval is not pending")
+        state = TaskState.create(self.new_task_id(), f"Resume approval {approval_id}", self.new_run_id())
+        self.current_task_state = state
+        self.current_run_dir = self.run_store.start_run(state)
+        self.emit_trace(state, "run_started", {"approval_id": approval_id, "original_run_id": record["run_id"]})
+        manager.decide(record, approved)
+        self._approval_to_resume = approval_id
+        self.last_approval_id = approval_id
         try:
-            answer = input(f"approve {name} {json.dumps(args, ensure_ascii=True)}? [y/N] ")
-        except EOFError:
-            return False
-        return answer.strip().lower() in {"y", "yes"}
+            state.record_tool(record["name"])
+            result = self.execute_tool(record["name"], record["args"])
+            self.record({"role": "tool", "name": record["name"], "args": record["args"], "content": result.content, "created_at": now(), **{key: result.metadata[key] for key in ("call_id", "input_fingerprint")}})
+            self.emit_trace(state, "tool_executed", {"name": record["name"], "result": clip(result.content, 500), **result.metadata})
+            if result.metadata["tool_status"] == "ok":
+                state.finish_success(result.content)
+            else:
+                state.stop("approval_denied", final_answer=result.content)
+            self.create_checkpoint(state, state.user_request, "approval_resolved")
+            self.run_store.write_task_state(state)
+            self.emit_trace(state, "run_finished", {"status": state.status, "approval_id": approval_id})
+            self.run_store.write_report(state, self.redact_artifact(self.build_report(state)))
+            return result
+        finally:
+            self._approval_to_resume = ""
 
     @staticmethod
     def parse(raw):

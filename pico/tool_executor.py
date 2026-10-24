@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import re
 import uuid
+from .approvals import ApprovalManager
 
 from .workspace import clip
 
@@ -49,6 +50,7 @@ class ToolExecutor:
         agent.current_call_id = "call_" + uuid.uuid4().hex[:12]
         call_id = agent.current_call_id
         state = agent.current_task_state
+        agent.last_approval_id = getattr(agent, "_approval_to_resume", "")
         if state is not None:
             state.last_call_id = call_id
         try:
@@ -56,7 +58,8 @@ class ToolExecutor:
             agent.trace_tool_event("tool_requested", {"name": name, "args": args})
             fingerprint = agent.tool_input_fingerprint(name, args)
             result = self._execute(name, args)
-            metadata = {**result.metadata, "call_id": call_id, "input_fingerprint": fingerprint}
+            ApprovalManager(agent).finish(result)
+            metadata = {**result.metadata, "call_id": call_id, "input_fingerprint": fingerprint, "approval_id": agent.last_approval_id}
             agent.trace_tool_event("tool_finished", {"name": name, **metadata})
             return ToolExecutionResult(result.content, metadata)
         finally:
